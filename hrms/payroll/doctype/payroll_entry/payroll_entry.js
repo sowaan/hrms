@@ -50,6 +50,8 @@ frappe.ui.form.on('Payroll Entry', {
 	},
 
 	refresh: function (frm) {
+		if (frm.doc.status === "Queued") frm.page.btn_secondary.hide()
+
 		if (frm.doc.docstatus === 0 && !frm.is_new()) {
 			frm.page.clear_primary_action();
 			frm.add_custom_button(__("Get Employees"),
@@ -205,7 +207,7 @@ frappe.ui.form.on('Payroll Entry', {
 			'currency', 'department', 'branch', 'designation', 'salary_slip_based_on_timesheet'];
 
 		fields.forEach(field => {
-			if (frm.doc[field]) {
+			if (frm.doc[field] || frm.doc[field] === 0) {
 				filters[field] = frm.doc[field];
 			}
 		});
