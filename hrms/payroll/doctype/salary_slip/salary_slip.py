@@ -1387,7 +1387,28 @@ class SalarySlip(TransactionBase):
 			}
 		)
 
-		return current_tax_amount
+		# Minus the amount from monthly tax that is already paid to tax authorities
+		extra_current_tax_amount = 0
+		if frappe.db.exists("DocType", "Paid Income Tax Monthly"):
+			extra_current_tax_amount = flt(frappe.db.sql("""
+				select 
+					sum(pitm.amount) 
+				from 
+					`tabPaid Income Tax Monthly` pitm
+				where
+					pitm.docstatus=1
+					and %(from_date)s>=pitm.period_from
+					and  %(to_date)s<=pitm.period_to
+					and %(from_date)s<=pitm.payroll_date
+					and  %(to_date)s>=pitm.payroll_date
+					and pitm.employee=%(employee)s
+			""",{
+				"employee": self.employee,
+				"from_date": self.start_date,
+				"to_date": self.end_date
+			})[0][0])
+
+		return current_tax_amount - extra_current_tax_amount
 
 	def get_income_tax_slabs(self):
 		income_tax_slab, ss_assignment_name = frappe.db.get_value(
@@ -1507,7 +1528,48 @@ class SalarySlip(TransactionBase):
 
 		tax_deducted_till_date = self.get_opening_for("tax_deducted_till_date", start_date, end_date)
 
-		return total_tax_paid + tax_deducted_till_date
+		# Minus the amount from annual tax that is already paid to tax authorities
+		total_extra_tax = 0
+		if frappe.db.exists("DocType", "Paid Income Tax"):
+			total_extra_tax = flt(frappe.db.sql("""
+				select 
+					sum(pit.amount) 
+				from 
+					`tabPaid Income Tax` pit
+				where
+					pit.docstatus=1
+					and %(from_date)s>=pit.period_from
+					and  %(to_date)s<=pit.period_to
+					and pit.employee=%(employee)s
+			""",{
+				"employee": self.employee,
+				"from_date": start_date,
+				"to_date": end_date
+			})[0][0])
+
+		# Minus the previous additional monthly tax
+		extra_current_tax_amount = 0
+		if frappe.db.exists("DocType", "Paid Income Tax Monthly"):
+			extra_current_tax_amount = flt(frappe.db.sql("""
+				select 
+					sum(pitm.amount) 
+				from 
+					`tabPaid Income Tax Monthly` pitm
+				where
+					pitm.docstatus=1
+					and %(from_date)s>=pitm.period_from
+					and  %(to_date)s<=pitm.period_to
+					and pitm.payroll_date < %(from_date)s
+					and pitm.payroll_date < %(to_date)s
+					and pitm.employee=%(employee)s
+			""",{
+				"employee": self.employee,
+				"from_date": self.start_date,
+				"to_date": self.end_date
+			})[0][0])
+
+			
+		return total_tax_paid + tax_deducted_till_date + total_extra_tax + extra_current_tax_amount
 
 	def get_taxable_earnings(self, allow_tax_exemption=False, based_on_payment_days=0):
 		joining_date, relieving_date = self.get_joining_and_relieving_dates()
