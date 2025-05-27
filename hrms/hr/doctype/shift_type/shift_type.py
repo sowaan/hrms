@@ -66,8 +66,8 @@ class ShiftType(Document):
 	) -> int:
 		return (
 			(round(time_diff(shift_end, shift_start).total_seconds() / 60))
-			+ self.allow_check_out_after_shift_end_time
-			+ self.begin_check_in_before_shift_start_time
+			+ (self.allow_check_out_after_shift_end_time or 0)
+			+ (self.begin_check_in_before_shift_start_time or 0)
 		)
 
 	def get_max_shift_buffer_label(self) -> str:
@@ -107,7 +107,6 @@ class ShiftType(Document):
 			return
 
 		logs = self.get_employee_checkins()
-
 		group_key = lambda x: (x["employee"], x["shift_start"])  # noqa
 		for key, group in groupby(sorted(logs, key=group_key), key=group_key):
 			single_shift_logs = list(group)
@@ -351,17 +350,33 @@ def update_last_sync_of_checkin():
 	shifts = frappe.get_all(
 		"Shift Type",
 		filters={"enable_auto_attendance": 1, "auto_update_last_sync": 1},
-		fields=["name", "last_sync_of_checkin"],
+		fields=["name", "last_sync_of_checkin", "start_time", "end_time"],
 	)
-
+	current_datetime = frappe.flags.current_datetime or get_datetime()
 	for shift in shifts:
-		last_shift_sync = frappe.db.get_value(
-			"Employee Checkin", {"shift": shift.name}, "time", order_by="time desc"
-		)
-		if not shift.last_sync_of_checkin or get_datetime(last_shift_sync) > get_datetime(
-			shift.last_sync_of_checkin
-		):
-			frappe.db.set_value("Shift Type", shift.name, "last_sync_of_checkin", last_shift_sync)
+		shift_end = get_actual_shift_end(shift, current_datetime)
+		update_last_sync = None
+		if shift.last_sync_of_checkin:
+			if get_datetime(shift.last_sync_of_checkin) < shift_end < current_datetime:
+				update_last_sync = True
+		elif shift_end < current_datetime:
+			update_last_sync = True
+		if update_last_sync:
+			frappe.db.set_value(
+				"Shift Type", shift.name, "last_sync_of_checkin", shift_end + timedelta(minutes=1)
+			)
+
+
+def get_actual_shift_end(shift, current_datetime):
+	time_within_shift = datetime.combine(current_datetime.date(), get_time(shift.start_time))
+	shift_details = get_shift_details(shift.name, time_within_shift)
+	actual_shift_start = shift_details["actual_start"]
+	actual_shift_end = shift_details["actual_end"]
+
+	if actual_shift_start.date() < actual_shift_end.date():
+		# shift start and end are on different days
+		actual_shift_end = add_days(actual_shift_end, -1)
+	return actual_shift_end
 
 
 def process_auto_attendance_for_all_shifts():

@@ -1694,6 +1694,105 @@ class TestSalarySlip(FrappeTestCase):
 		self.assertEqual(test_tds.accounts[0].company, salary_slip.company)
 		self.assertListEqual(tax_component, ["_Test TDS"])
 
+	def test_opening_balances_excluded_from_tax_calculation(self):
+		"""tests if opening balances in salary structure assignment are excluded from tax when assignment date is before payroll period"""
+		from hrms.payroll.doctype.salary_structure.test_salary_structure import make_salary_structure
+
+		frappe.db.delete("Income Tax Slab", {"currency": "INR"})
+		emp = make_employee(
+			"test_opening_balances@salary.com",
+			company="_Test Company",
+			date_of_joining="2022-04-01",
+		)
+
+		payroll_period = create_payroll_period(
+			name="_Test Opening Balance Payroll Period",
+			company="_Test Company",
+			start_date="2023-04-01",
+			end_date="2024-03-31",
+		)
+
+		# create salary structure and assignment with from_date before payroll period
+		salary_structure = make_salary_structure(
+			"Test Opening Balance Structure",
+			"Monthly",
+			company="_Test Company",
+			employee=emp,
+			from_date="2022-04-01",
+			payroll_period=payroll_period,
+			test_tax=True,
+			base=50000,
+		)
+
+		ssa = frappe.get_value(
+			"Salary Structure Assignment",
+			{"employee": emp, "salary_structure": salary_structure.name},
+			"name",
+		)
+		ssa_doc = frappe.get_doc("Salary Structure Assignment", ssa)
+		# Set opening tax balances in assignment
+		ssa_doc.db_set("taxable_earnings_till_date", 600000)
+		ssa_doc.db_set("tax_deducted_till_date", 45500)
+
+		# Create salary slip
+		salary_slip = make_salary_slip(salary_structure.name, employee=emp, posting_date="2023-04-01")
+
+		# calculate expected taxable amount without opening balance
+		# 50000 (base) + 28000 (other earnings from structure)
+		monthly_taxable_earnings = 78000
+		expected_annual_taxable_amount = monthly_taxable_earnings * 12
+
+		# Verify that opening balance is not included in tax calculation
+		self.assertNotEqual(
+			salary_slip.annual_taxable_amount,
+			expected_annual_taxable_amount + ssa_doc.taxable_earnings_till_date,
+		)
+		self.assertEqual(salary_slip.income_tax_deducted_till_date, salary_slip.current_month_income_tax)
+
+	def test_tax_payable_with_tax_relief_and_marginal_relief_limits(self):
+		from hrms.payroll.doctype.salary_structure.test_salary_structure import make_salary_structure
+		from hrms.regional.india.setup import setup
+
+		setup()
+
+		frappe.db.delete("Income Tax Slab", {"currency": "INR"})
+		emp = make_employee(
+			"test_employee_tax_relief@salary.com",
+			company="_Test Company",
+			date_of_joining="2021-01-01",
+		)
+
+		payroll_period = frappe.get_last_doc("Payroll Period", filters={"company": "_Test Company"})
+
+		create_tax_slab(payroll_period, effective_date=payroll_period.start_date, apply_tax_relief=True)
+
+		salary_structure_doc = make_salary_structure(
+			"Test Tax Relief",
+			"Monthly",
+			company="_Test Company",
+			employee=emp,
+			payroll_period=payroll_period,
+			test_tax=True,
+			base=65000,
+		)
+
+		salary_slip = make_salary_slip(
+			salary_structure_doc.name, employee=emp, posting_date=payroll_period.start_date
+		)
+
+		tax_relief_limit, marginal_relief_limit = frappe.db.get_value(
+			"Income Tax Slab", {"currency": "INR"}, ["tax_relief_limit", "marginal_relief_limit"]
+		)
+
+		# taxable income within marginal relief limit
+		self.assertGreater(marginal_relief_limit, salary_slip.annual_taxable_amount)
+
+		# tax payable is reduced to income excess over tax relief limit
+		total_income_tax = salary_slip.annual_taxable_amount - tax_relief_limit
+		total_income_tax += total_income_tax * 0.04  # add cess
+
+		self.assertEqual(salary_slip.total_income_tax, total_income_tax)
+
 
 class TestSalarySlipSafeEval(FrappeTestCase):
 	def test_safe_eval_for_salary_slip(self):
@@ -2074,6 +2173,7 @@ def create_tax_slab(
 	dont_submit=False,
 	currency=None,
 	company=None,
+	apply_tax_relief=False,
 ):
 	if not currency:
 		currency = erpnext.get_default_currency()
@@ -2109,6 +2209,10 @@ def create_tax_slab(
 			income_tax_slab.append("slabs", item)
 
 		income_tax_slab.append("other_taxes_and_charges", {"description": "cess", "percent": 4})
+
+		if apply_tax_relief:
+			income_tax_slab.tax_relief_limit = 1200000
+			income_tax_slab.marginal_relief_limit = 1275000
 
 		income_tax_slab.save()
 		if not dont_submit:

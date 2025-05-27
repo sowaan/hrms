@@ -39,7 +39,7 @@
 			</div>
 		</div>
 
-		<EmptyState message="You have no leaves allocated" v-else />
+		<EmptyState :message="__('You have no leaves allocated')" v-else />
 	</div>
 </template>
 
@@ -47,7 +47,9 @@
 import SemicircleChart from "@/components/SemicircleChart.vue"
 
 import { leaveBalance } from "@/data/leaves"
+import { inject } from "vue"
 
+const __ = inject("$translate")
 const getChartColor = (index) => {
 	// note: tw colors - rose-400, pink-400 & purple-500 of the old frappeui palette #918ef5
 	const chartColors = ["text-[#fb7185]", "text-[#f472b6]", "text-[#918ef5]"]
