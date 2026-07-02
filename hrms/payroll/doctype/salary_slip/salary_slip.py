@@ -375,7 +375,11 @@ class SalarySlip(TransactionBase):
 				.where(
 					(Timesheet.employee == self.employee)
 					& (Timesheet.start_date.between(self.start_date, self.end_date))
-					& ((Timesheet.status == "Submitted") | (Timesheet.status == "Billed"))
+					& (
+						(Timesheet.status == "Submitted")
+						| (Timesheet.status == "Billed")
+						| (Timesheet.status == "Partially Billed")
+					)
 				)
 			).run(as_dict=1)
 
@@ -916,7 +920,7 @@ class SalarySlip(TransactionBase):
 		# get taxable_earnings for current period (all days)
 		self.current_taxable_earnings = self.get_taxable_earnings(self.tax_slab.allow_tax_exemption)
 		self.future_structured_taxable_earnings = self.current_taxable_earnings.taxable_earnings * (
-			ceil(self.remaining_sub_periods) - 1
+			round(self.remaining_sub_periods) - 1
 		)
 
 		current_taxable_earnings_before_exemption = (
@@ -924,7 +928,7 @@ class SalarySlip(TransactionBase):
 			+ self.current_taxable_earnings.amount_exempted_from_income_tax
 		)
 		self.future_structured_taxable_earnings_before_exemption = (
-			current_taxable_earnings_before_exemption * (ceil(self.remaining_sub_periods) - 1)
+			current_taxable_earnings_before_exemption * (round(self.remaining_sub_periods) - 1)
 		)
 
 		# get taxable_earnings, addition_earnings for current actual payment days
@@ -1330,8 +1334,14 @@ class SalarySlip(TransactionBase):
 		)
 
 		for additional_salary in additional_salaries:
+			component_data = get_salary_component_data(additional_salary.component)
+			remove_if_zero_valued = frappe.get_cached_value(
+				"Salary Component", additional_salary.component, "remove_if_zero_valued"
+			)
+			if flt(additional_salary.amount) == 0 and remove_if_zero_valued:
+				continue
 			self.update_component_row(
-				get_salary_component_data(additional_salary.component),
+				component_data,
 				additional_salary.amount,
 				component_type,
 				additional_salary,
@@ -1417,6 +1427,7 @@ class SalarySlip(TransactionBase):
 				sca.company,
 			)
 			.where(sc.variable_based_on_taxable_salary == 1)
+			.where(sc.disabled == 0)
 		).run(as_dict=True)
 
 		for component in components:
@@ -1572,10 +1583,12 @@ class SalarySlip(TransactionBase):
 
 		if has_additional_salary_tax_component:
 			self.current_structured_tax_amount = self.additional_salary_amount
-		else:
+		elif self.remaining_sub_periods > 0:
 			self.current_structured_tax_amount = (
 				self.total_structured_tax_amount - self.previous_total_paid_taxes
 			) / self.remaining_sub_periods
+		else:
+			self.current_structured_tax_amount = 0.0
 
 		# Total taxable earnings with additional earnings with full tax
 		self.full_tax_on_additional_earnings = 0.0
@@ -1723,9 +1736,9 @@ class SalarySlip(TransactionBase):
 				amount, additional_amount = self.get_amount_based_on_payment_days(earning)
 			else:
 				if earning.additional_amount:
-					amount, additional_amount = earning.amount, earning.additional_amount
+					amount, additional_amount = earning.amount or 0, earning.additional_amount or 0
 				else:
-					amount, additional_amount = earning.default_amount, earning.additional_amount
+					amount, additional_amount = earning.default_amount or 0, earning.additional_amount or 0
 
 			if earning.is_tax_applicable:
 				if earning.is_flexible_benefit:
@@ -1957,6 +1970,7 @@ class SalarySlip(TransactionBase):
 				).format(payroll_settings.password_policy)
 
 		if receiver:
+			posting_date = getdate(self.posting_date)
 			email_args = {
 				"sender": payroll_settings.sender_email,
 				"recipients": [receiver],
@@ -1967,6 +1981,7 @@ class SalarySlip(TransactionBase):
 				],
 				"reference_doctype": self.doctype,
 				"reference_name": self.name,
+				"send_after": posting_date if posting_date > getdate() else None,
 			}
 			if not frappe.flags.in_test:
 				enqueue(method=frappe.sendmail, queue="short", timeout=300, is_async=True, **email_args)
@@ -2191,9 +2206,11 @@ def get_salary_component_data(component):
 			"depends_on_payment_days",
 			"salary_component_abbr as abbr",
 			"do_not_include_in_total",
+			"do_not_include_in_accounts",
 			"is_tax_applicable",
 			"is_flexible_benefit",
 			"variable_based_on_taxable_salary",
+			"exempted_from_income_tax",
 		),
 		as_dict=1,
 		cache=True,
